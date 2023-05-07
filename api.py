@@ -2,6 +2,7 @@ import requests
 import json
 import qrcode
 import datetime
+import time
 
 import config
 
@@ -9,26 +10,27 @@ import config
 class Customer():
     '''Базовая информация об клиентах'''
 
-    def __init__(self, id = None, 
-                 accounts = None, 
-                 type = None, 
-                 date = None, 
-                 tokens = None, 
-                 firstName = '', 
-                 lastName = '', 
+    def __init__(self, id=None,
+                 accounts=None,
+                 type=None,
+                 date=None,
+                 tokens=None,
+                 firstName='',
+                 lastName='',
                  **kwargs):
-        self.id = id # id
-        if (accounts != None): self.available = accounts[0]['accountBalance']['available'] # баланс 
-        self.name = firstName + lastName # имя, фамилия
-        self.type = type # тип аккаунта
-        self.tokens: list = tokens # индетификационые ключи
-        self.date = date # дата регистрации
+        self.id = id  # id
+        if (accounts != None):
+            # баланс
+            self.available = accounts[0]['accountBalance']['available']
+        self.name = firstName + lastName  # имя, фамилия
+        self.type = type  # тип аккаунта
+        self.tokens: list = tokens  # индетификационые ключи
+        self.date = date  # дата регистрации
+
 
 class Api():
     '''
-    Выгрузка данных из CRM об клиента (история транцакций,
-    баланс бонусов, формирование QR кода для авторизации)
-    
+    Класс работы с API quickresto
     '''
 
     headers = {
@@ -36,11 +38,8 @@ class Api():
         'Content-Type': 'application/json',
     }
     # url для входа в API QuickResto
-    URL = 'https://{login}.quickresto.ru/platform/online/'.format(login=config.login) 
-
-    def __init__(self, number): 
-        self.number = number # Номер телефона клиента
-
+    URL = 'https://{login}.quickresto.ru/platform/online/'.format(
+        login=config.login)
 
     def _datetime_format(self, date) -> str:
         '''Преобразование даты и времени из QickResto'''
@@ -50,11 +49,21 @@ class Api():
     def _json_format(self, data) -> str:
         '''Преобразование словаря в читаемый API QR формат'''
         return str(data).replace('\'', '"').replace(' ', '').encode('utf-8')
-    
-    def _post(self, url, data) -> requests:
+
+    def _post(self, url, data=None, params=None, json=True) -> requests:
         '''Post запрос в API QuickResto и возврат в json формате'''
-        return requests.post(url=url, auth=(config.login, config.password), headers=self.headers, data=data).json()
-    
+        response = requests.post(
+            url=url,
+            auth=(config.login, config.password),
+            headers=self.headers,
+            data=data,
+            params=params
+        )
+        if json:
+            return response.json()
+        else:
+            return response
+
     def _save_json(self, response) -> None:
         '''Сохранение данных из API в json формате'''
         with open('data.json', 'w') as base:
@@ -66,46 +75,168 @@ class Api():
         for data in history:
             if data['type'] == 'DEBIT_CONFIRMATION':
                 data['type'] = 'Списание'
-            elif data['type'] == 'CREDIT': 
+            elif data['type'] == 'CREDIT':
                 data['type'] = 'Начисление'
             else:
-                break
-            text.append('{}: {} ({})\n'.format(data['type'], data['amount'], self._datetime_format(data['regTime'])))
-        return ''.join(reversed(text))
-    
-    def client_info(self) -> Customer:
-        '''Выгрузка базовой информации о клиенте  (поиск по номеру телефона)'''
+                continue
+            text.append('{}: {} ({})\n'.format(
+                data['type'], data['amount'], self._datetime_format(data['regTime'])))
+        return text
+
+
+class CustomerOperation(Api):
+    '''Операции с клиентсикими обьектами'''
+
+    def createCustomer(self, firstName='', phone_number=None, telegram_id=None):
+        ''' Создание гостя в системе QuickResto'''
+
+        url = self.URL + 'bonuses/createCustomer'
+        tokens = list()
+        if phone_number:
+            tokens.append({
+                'type': 'phone',
+                'entry': 'manual',
+                'key': phone_number
+            })
+        if telegram_id:
+            tokens.append({
+                'type': 'card',
+                'entry': 'barCode',
+                'key': telegram_id
+            })
+        data = {
+            'firstName': firstName,
+            # 'lastName': lastName,
+            # 'dateOfBirth': datetime, #'1990-03-07T19:00:00.000Z'
+            'tokens': tokens
+        }
+        return self._post(url, self._json_format(data))
+
+    def filterCustomer(self, phone_number):
+        '''Фильтрация гостей по номеру'''
+
+        url = self.URL + 'bonuses/filterCustomers'
+        data = {'search': phone_number}
+        return self._post(url, self._json_format(data))
+
+    def getCustomer(self, telegram_id=None, phone_number=None):
+        '''Получить обьект Customer из API'''
 
         url = self.URL + 'bonuses/customerInfo'
-        data = {
-            "customerToken":{
-                "type": "phone",
-                "entry": "manual",
-                "key": self.number
-            }
-        }
-        return Customer(**self._post(url, self._json_format(data)))
+        if telegram_id:
+            data = {
+                "customerToken": {
+                    "type": "card",
+                    "entry": "barCode",
+                    "key": telegram_id
+                }}
+        if phone_number:
+            try:
+                data = {
+                    "customerToken": {
+                    'type': 'phone',
+                    'entry': 'manual',
+                    'key': self.filterCustomer(phone_number)['customers'][0]['contactMethods'][0]['value'],
+                    }
+                    }
+            except:
+                data = {
+                    "customerToken": {
+                        'type': 'phone',
+                        'entry': 'manual',
+                        'key': phone_number
+                    }}
+        return self._post(url, self._json_format(data))
 
-    def client_history(self):
+
+    def addToken(self, id, token):
+        url_reg = 'https://kosplace.quickresto.ru/platform/j_spring_security_check'
+        data = 'j_username={}&j_password={}&j_rememberme=true'.format(config.adminLogin, config.adminPassword)
+        headers = {
+            'Connection': 'keep-alive',
+            'Accept': 'application/json, text/plain, */*',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            }
+        reg = requests.post(url_reg, data=data, headers=headers)
+        cookies = reg.cookies
+        time.sleep(1)
+        url = 'https://kosplace.quickresto.ru/platform/data/crm.customer.tokens/create?ownerContextId=%s&ownerContextClassName=ru.edgex.quickresto.modules.crm.customer.CrmCustomer&businessDayOffsetInMs=0&timeZone=-180' %id
+        data_2='{"className":"ru.edgex.quickresto.modules.crm.customer.tokens.CrmToken","type":"card","entry":"barCode","key":"%s"}' %token
+        if requests.post(url, data=data_2, cookies=cookies).status_code == 200:
+            return True
+        else:
+            return False
+
+class Crm_info(CustomerOperation):
+    '''
+    Выгрузка данных из CRM об клиента (история транцакций,
+    баланс бонусов, формирование QR кода для авторизации)
+    '''
+
+    def client_balance(self, phone_number) -> str:
+        '''Кол-во бонусов клиента (поиск по telegram_id)'''
+
+        url = self.URL + 'bonuses/balance'
+        try:
+            data = {
+                "customerToken": {
+                    'type': 'phone',
+                    'entry': 'manual',
+                    'key': int(self.filterCustomer(phone_number)['customers'][0]['contactMethods'][0]['value']),
+                    },
+                "accountType": {
+                    "accountGuid": "bonus_account_type-1"
+                }
+            }
+        except:
+            data = {
+                "customerToken": {
+                    'type': 'phone',
+                    'entry': 'manual',
+                    'key': phone_number
+                },
+                "accountType": {
+                    "accountGuid": "bonus_account_type-1"}
+            }
+        try:
+            return self._post(url, self._json_format(data))['accountBalance']['available']
+        except:
+            return 0
+
+    def client_history(self, phone_number):
         '''История транзакций в бонусной системе клиента'''
 
         url = self.URL + 'bonuses/operationHistory'
-        data = {
-            "customerToken": {
-                "type": "phone",
-                "entry": "manual",
-                "key": self.number
-            }, 
-            "accountType": {
-                "accountGuid": "bonus_account_type-1"
+        try:
+            data = {
+                "customerToken": {
+                    'type': 'phone',
+                    'entry': 'manual',
+                    'key': int(self.filterCustomer(phone_number)['customers'][0]['contactMethods'][0]['value']),
+                    },
+                "accountType": {
+                    "accountGuid": "bonus_account_type-1"
+                }
             }
-        }
-        return self._format_history(self._post(url, self._json_format(data))['transactions'])
+        except:
+            data = {
+                "customerToken": {
+                    'type': 'phone',
+                    'entry': 'manual',
+                    'key': phone_number
+                },
+                "accountType": {
+                    "accountGuid": "bonus_account_type-1"}
+            }
+        try:
+            return self._format_history(self._post(url, self._json_format(data))['transactions'])
+        except:
+            return 'Транзакции отсутствуют'
 
-    def qr_code(self):
+    def qr_code(self, phone_number):
         '''Формирование QR кода'''
         try:
-            return open('files/qr/qr_%d.png'%self.number, 'rb')
+            return open('files/qr/qr_%d.png' % phone_number, 'rb')
         except:
             qr = qrcode.QRCode(
                 version=1,
@@ -113,53 +244,10 @@ class Api():
                 box_size=10,
                 border=4,
             )
-            qr.add_data(self.number)
+            qr.add_data(phone_number)
             img = qr.make_image(fill_color="black", back_color="white")
-            img.save('files/qr/qr_%d.png'%self.number)
-            return open('files/qr/qr_%d.png'%self.number, 'rb')
-        
-      
-
-class CustomerOperation(Api):
-    '''Операции с клиентсикими обьектами'''
-
-    def createObject(self, firstName='', lastName='', number=''):
-        ''' Создание гостя в системе QuickResto'''
-
-        url = self.URL + 'bonuses/createCustomer'
-        data = {
-            'firstName': firstName,
-            'lastName': lastName,
-            #'dateOfBirth': datetime, #'1990-03-07T19:00:00.000Z'
-            'tokens': [{
-                'type': 'phone',
-                'entry': 'manual',
-                'key': number
-                },{
-                'type': 'card',
-                'entry': 'barCode',
-                'key': number
-                }  
-            ],
-        }
-
-        return self._post(url, self._json_format(data))
-
-# в разработке ........
-
-    def updateObject(self):
-        ''' Изменение данных о госте в QuickResto'''
-        params = {
-            "moduleName": 'crm.customer',
-            "ownerContextId": 'ownerContextId',
-            "ownerContextClassName": 'ownerContextClassName',
-            "parentContextId": 'parentContextId',
-            "parentContextClassName": 'parentContextClassName'
-        }
-
-        json_data = object.get_json_object()
-
-        return self.post(self.URL+'api/update', parameters=params, json_data=json_data)
+            img.save('files/qr/qr_%d.png' % phone_number)
+            return open('files/qr/qr_%d.png' % phone_number, 'rb')
 
 
 if __name__ == '__main__':

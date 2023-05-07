@@ -1,19 +1,25 @@
 import logging
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.utils import executor
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.dispatcher import FSMContext
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 
 import config
 import api
-from model import *
+from model import find_customer, add_customer
 
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=config.TOKEN)
+admin_bot = Bot(token=config.adminTOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
+
+
+key1 = types.KeyboardButton(text='Баланс')
+key2 = types.KeyboardButton(text='История')
+key3 = types.KeyboardButton(text='QR код')
+keyboard_main = types.ReplyKeyboardMarkup().add(key1, key2, key3)
+keyboard_main.resize_keyboard = True
 
 
 @dp.message_handler(commands=['start'])
@@ -21,77 +27,109 @@ async def show_hello(message: types.Message):
     '''Сообщение при старте бота'''
 
     # поиск в локальной БД гостя по telegram_id
-    customer = find_customer(message.chat.id)
-
-    if customer.telegram_id:
-        await message.answer(text='С возвращением {}'.format(customer.name))
-        # создание объекта гость с данными из QuickResto
-        guest = api.Api(customer.number)
-        info = guest.client_info()  # базовая информация о госте
-        await message.answer(text='{} у вас {} баллов'.format(info.name, info.available))
+    if find_customer(message.chat.id):
+        await message.answer(text='С возвращением, {}'.format(message.chat.first_name), reply_markup=keyboard_main)
     else:
-        key1 = types.InlineKeyboardButton(
-            text='Вход', callback_data='login')
-        key2 = types.InlineKeyboardButton(
-            text='Регистрация', callback_data='registration')
-        keyboard = types.InlineKeyboardMarkup().add(key1, key2)
-        await message.answer(
-            text='''
-Здраствуйте, {}!
-Добро пожаловать в систему лояльности Kos.Place.
-Мы начисляем 5% с каждого чека на ваш бонусный счет,
-и в дальнейшем можем списать до 50% из суммы чека из
-ваших бонусов.'''.format(message.chat.first_name)
-        )
-        await message.answer(
-            text='''
-Если вы уже зарегестрированы у нас в бонусной программе,
-нажмите вход и введите номер, который указывали при регистрации.
-Если вы впервые у нас, то нажмите регистрация
-и введите ваш номер или любой другой индетификационный номер
-            ''', reply_markup=keyboard
-        )
+        key1 = types.KeyboardButton(
+            text='Новости + бонусы за них', callback_data='set_news')
+        key2 = types.KeyboardButton(
+            text='Только система лояльности', callback_data='only_bonuses')
+        button_phone = types.KeyboardButton(text="Телефон",
+                                            request_contact=True)
+        keyboard = types.ReplyKeyboardMarkup(
+            resize_keyboard=True).add(button_phone)
+        text_first = '''Здравствуйте, {}!
+Мы рады знакомству с тобой!
+Добро пожаловать в систему лояльности кофейни KOS.PLACE.'''
+        text_second = '''Мы начисляем 5% с каждого чека на ваш бонусный счет и в дальнейшем можем списать до 50% суммы чека из ваших бонусов.
+В данном чате вы будете видеть зачисления\списания бонусов и ваш баланс.
+<b>Нажмите на кнопку "Телефон" для входа или регистрации.</b>'''
+        # text_thrid = '''Также, в этом чате мы будем награждать вас бонусами и отправлять для вас только полезную информацию'''
+        await message.answer(text=text_first.format(message.chat.first_name))
+        await message.answer(text=text_second, reply_markup=keyboard, parse_mode='HTML')
+        # await message.answer(text=text_thrid, reply_markup=keyboard)
 
 
-@dp.message_handler(commands=['history'])
-async def show_history(message: types.Message):
+@dp.message_handler(content_types=['contact'])
+async def contact(message: types.Message):
+    if message.contact is not None:
+        phone_number = message.contact.phone_number
+        guest = api.CustomerOperation()
+        get_guest = guest.getCustomer(phone_number=phone_number[1:])
+        if 'errorCode' in get_guest.keys():
+            customer = guest.createCustomer(firstName=message.chat.first_name, telegram_id=message.chat.id, phone_number=phone_number[1:])
+            add_customer(telegram_id=message.chat.id, qresto_id=customer['customer']['id'], 
+                         name=message.chat.first_name, phone_number=phone_number[1:], news=False)
+            await message.answer('Успешная регистрация!', reply_markup=keyboard_main)
+        else:
+            tokens = guest.filterCustomer(phone_number[1:])['customers'][0]['tokens']
+            if len(tokens) == 0 or phone_number[1:] not in [token['key'] for token in tokens]:
+                guest.addToken(get_guest['id'], phone_number[1:])
+            add_customer(telegram_id=message.chat.id,
+                qresto_id=get_guest['id'], name=message.chat.first_name, news=False, phone_number=phone_number[1:])
+            await message.answer('Ваш номер уже зарегистрирован!', reply_markup=keyboard_main)
+
+
+@dp.message_handler(lambda message: message.text == '/history' or message.text == 'История')
+async def show_history(message: types.Message, page=1, previous_message=None):
     '''Вывод истории транзакций пользователя'''
 
     # поиск в локальной БД гостя по telegram_id
     customer = find_customer(message.chat.id)
-    if customer.telegram_id:
+    if customer:
         # создание объекта гость с данными из QuickResto
-        guest = api.Api(customer.number)
-        await message.answer(text='{}'.format(guest.client_history()))
+        guest = api.Crm_info()
+        history = guest.client_history(customer[0].phone_number)
+        if len(history) > 6 and type(history) == list():
+            pages_count = len(history) // 6 + 1
+            buttons = types.InlineKeyboardMarkup()
+            left = page-1 if page != 1 else pages_count
+            right = page+1 if page != pages_count else 1
+            left_button = types.InlineKeyboardButton(
+                "←", callback_data=f'to {left}')
+            page_button = types.InlineKeyboardButton(
+                f"{str(page)}/{str(pages_count)}", callback_data='_')
+            right_button = types.InlineKeyboardButton(
+                "→", callback_data=f'to {right}')
+            buttons.add(left_button, page_button, right_button)
+            try:
+                if page == 1 and not previous_message:
+                    await message.answer(text='{}'.format(''.join(history[(page-1)*6:page*6])), reply_markup=buttons)
+                else:
+                    await message.edit_text(text='{}'.format(''.join(history[(page-1)*6:page*6])), reply_markup=buttons)
+                # await message.answer(text='{}'.format(''.join(history[(page-1)*6:page*6])), reply_markup=buttons)
+            except:
+                pass
+        else:
+            await message.answer(text='{}'.format(''.join(history)))
     else:
         await message.answer(text='Вы не вошли. Введите команду /start')
 
 
-@dp.message_handler(commands=['balance'])
+@dp.message_handler(lambda message: message.text == '/balance' or message.text == 'Баланс')
 async def show_balance(message: types.Message):
     '''Вывод актуального баланса пользователя'''
 
     # поиск в локальной БД гостя по telegram_id
     customer = find_customer(message.chat.id)
-    if customer.telegram_id:
+    if customer:
         # создание объекта гость с данными из QuickResto
-        guest = api.Api(customer.number)
-        info = guest.client_info()  # базовая информация о госте
-        await message.answer(text='{} у вас {} баллов'.format(info.name, info.available))
+        guest = api.Crm_info()
+        await message.answer(text='{}, у вас {} баллов'.format(customer[0].name, guest.client_balance(customer[0].phone_number)))
     else:
         await message.answer(text='Вы не вошли. Введите команду /start')
 
 
-@dp.message_handler(commands=['qr'])
+@dp.message_handler(lambda message: message.text == '/qr' or message.text == 'QR код')
 async def show_qr(message: types.Message):
     '''Вывод QR кода пользователя для его индетификации в программе лояльности'''
 
     # создание объекта гость с данными из QuickResto
     customer = find_customer(message.chat.id)
-    if customer.telegram_id:
+    if customer:
         # базовая информация о госте
-        guest = api.Api(customer.number)
-        await message.answer_photo(photo=guest.qr_code())
+        guest = api.Crm_info()
+        await message.answer_photo(photo=guest.qr_code(customer[0].phone_number))
     else:
         await message.answer(text='Вы не вошли. Введите команду /start')
 
@@ -100,152 +138,38 @@ async def show_qr(message: types.Message):
 async def call_info(call: types.CallbackQuery):
     '''Захват нажатие кнопки после старта бота, регистрация или вход'''
 
-    if call.data == 'login':
-        await Login.check.set()  # Вход в SFM входа
-        await bot.send_message(
-            chat_id=call.from_user.id,
-            text='''
-            Ваш номер: (Пример: 79874352121)
-            '''
-        )
+    if 'to' in call.data:
+        page = int(call.data.split(' ')[1])
+        await show_history(call.message, page=page, previous_message=call.message)
+        await bot.answer_callback_query(call.id)
 
-    if call.data == 'registration':
-        await Registration.check()  # Вход в SFM регистрации
+    if call.data == 'set_news':
+        guest = api.CustomerOperation()
+        if 'errorCode' in guest.getCustomer(telegram_id=call.from_user.id).keys():
+            customer = guest.createCustomer(
+                firstName=call.from_user.first_name, telegram_id=call.from_user.id)
+            add_customer(telegram_id=call.from_user.id,
+                         qresto_id=customer['customer']['id'], name=call.from_user.first_name, news=True)
+            await bot.answer_callback_query(call.id)
+        else:
+            customer = guest.getCustomer(telegram_id=call.from_user.id)
+            add_customer(telegram_id=call.from_user.id,
+                         qresto_id=customer['id'], name=call.from_user.first_name, news=True)
+            await bot.answer_callback_query(call.id)
 
-
-class Registration(StatesGroup):
-    check = State()
-    number = State()
-    finish = State()
-
-
-class Login(StatesGroup):
-    registration = State()  # Регистрация номого пользователя
-    check = State()  # Проверка номера в БД
-    again = State()
-    finish = State()
-
-
-@dp.message_handler(state=Login.check)
-async def process_name(message: types.Message, state: FSMContext):
-    """
-    Проверка в БД QuickResto номера или индетификационного номера
-    """
-    customer = api.Api(
-        message.text)  # создание объекта гость с данными из QuickResto
-    info = customer.client_info()  # базовая информация о госте
-    if info.id:
-        await message.answer(text='{} у вас {} баллов'.format(info.name, info.available))
-        try:
-            # добавление гостя в локальную БД
-            add_customer(message.chat.id,
-                         message.from_user.full_name, message.text)
-        except:
-            pass
-        await state.finish()  # выход из SFM, т.к гость найдет в QuickResto
-    else:
-        await Login.again.set()  # переход к повоторному вопросу
-        await message.answer(
-            text='Вы не зарегистрированы или ввели номер не верно. Попробуйте еще раз'
-        )
-
-
-@dp.message_handler(state=Login.again)
-async def process_name(message: types.Message, state: FSMContext):
-    ''''
-    Повторная проверка номера и помощь или регистрация в случае отсутствия
-    '''
-
-    # создание объекта гость с данными из QuickResto
-    customer = api.Api(message.text)
-    info = customer.client_info()  # базовая информация о госте
-    if info.id:
-        await message.answer(text='{} у вас {} баллов'.format(info.name, info.available))
-        try:
-            # добавление гостя в локальную БД
-            add_customer(message.chat.id,
-                         message.from_user.full_name, message.text)
-        except:
-            pass
-        await state.finish()  # выход из SFM, т.к гость найдет в QuickResto
-    else:
-        key1 = types.InlineKeyboardButton(
-            text='Служба поддержки', callback_data='help')
-        key2 = types.InlineKeyboardButton(
-            text='Регистрация', callback_data='registration')
-        keyboard = types.InlineKeyboardMarkup().add(key1, key2)
-        # переход к перехвату нажатия кнопок
-        await Login.finish.set()
-        await message.answer(
-            text='Не могу найти, возможно Вас нет в программе лояльности',
-            reply_markup=keyboard
-        )
-
-dp.callback_query_handler(lambda call: call.data, state=Login.finish)
-
-
-async def call_info(call: types.CallbackQuery, state: FSMContext):
-    '''
-    Перехват нажатия кнопки
-    '''
-
-    if call.data == 'help':  # отправка в службу поддержки
-        await bot.send_message(call.from_user.id, 'Служба поддержки в разработке')
-    if call.data == 'registration':  # переход в SFM регистрации
-        await Registration.number.set()
-
-
-@dp.message_handler(state=Registration.check)
-async def check_number(message: types.Message, state: FSMContext):
-    '''
-    Проверка номера при регистрации на наличие в БД QiuckResto
-    '''
-    customer = api.Api(
-        message.text)  # создание объекта гость с данными из QuickResto
-    info = customer.client_info()  # базовая информация о госте
-    if info.id:
-        await message.answer(text='Вы уже зарегистрированы!')
-        await message.answer(text='{} у вас {} баллов'.format(info.name, info.available))
-        await state.finish()  # выход из SFM
-    else:
-        await message.answer(text='''
-Ваш номер: (Пример: 79874352121). 
-Если вы не хотите вводить свой номер, можете ввести любой уникальный набор цифр')'''
-                             )
-        await state.next()  # переход к шагу ввода номера
-
-
-@dp.message_handler(state=Registration.number)
-async def check_number(message: types.Message, state: FSMContext):
-    '''
-    Проверка номера на число
-    '''
-    if (message.text).isdigit():
-        async with state.proxy() as data:
-            data['number'] = message.text
-        await message.answer(text='''
-Спасибо, что Вы с нами! 
-'''.format(message.from_user.first_name, message.from_user.last_name))
-        await state.next()  # переход к шагу проверки данных
-    else:
-        await message.answer(text='Вводите только цифры!')
-
-
-@dp.message_handler(state=Registration.finish)
-async def check_number(message: types.Message, state: FSMContext):
-    '''
-    Проверка данных, добавление пользователя в локальную БД,
-    и вывод базовой информации и пользоватиле
-    '''
-    async with state.proxy() as data:
-        add_customer(message.chat.id,
-                     message.from_user.full_name, data['number'])
-        await message.answer(text='''
-Вы зарегистрированы
-Ваш номер {}
-Ваше имя {}'''.format(data['number'], data['name']))
-
-    await state.finish()  # выход из SFM
+    if call.data == 'only_bonuses':
+        guest = api.CustomerOperation()
+        if 'errorCode' in guest.getCustomer(telegram_id=call.from_user.id).keys():
+            customer = guest.createCustomer(
+                firstName=call.from_user.first_name, telegram_id=call.from_user.id)
+            add_customer(telegram_id=call.from_user.id,
+                         qresto_id=customer['customer']['id'], name=call.from_user.first_name, news=False)
+            await bot.answer_callback_query(call.id)
+        else:
+            customer = guest.getCustomer(telegram_id=call.from_user.id)
+            add_customer(telegram_id=call.from_user.id,
+                         qresto_id=customer['id'], name=call.from_user.first_name, news=False)
+            await bot.answer_callback_query(call.id)
 
 
 if __name__ == '__main__':

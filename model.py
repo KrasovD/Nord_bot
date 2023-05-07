@@ -3,39 +3,46 @@
 и функции работы с ней
 '''
 
-from peewee import *
+from sqlalchemy import create_engine, Column, MetaData, Table, Integer, DateTime, String, Boolean
+from sqlalchemy import select, insert
 
-conn = SqliteDatabase('customer.db')
+engine = create_engine('sqlite:///customer.db')
 
-class BaseModel(Model):
-    '''Базовая модель с привязкой к файлу БД'''
-    class Meta:
-        database = conn
+meta_data = MetaData()
 
-class Customer(BaseModel):
-    '''Модель пользователя'''
+customer= Table(
+    'customer',
+    meta_data,
+    Column('id', Integer, primary_key=True, autoincrement=True),
+    Column('telegram_id', Integer),
+    Column('qresto_id', Integer),
+    Column('name', String, nullable=True),
+    Column('phone_number', Integer, nullable=True),
+    Column('news', Boolean, nullable=True)
+    )
 
-    telegram_id = IntegerField(column_name='Telegram_id', primary_key=True)
-    name = TextField(column_name='Name')
-    number = IntegerField(column_name='Number')
-    birthday = DateField(column_name='Birthday', null=True)
-
-# Соединение с БД и попытка создать таблицу, если не создана
-conn.connect()
 try:
-    conn.create_tables([Customer])
+    meta_data.create_all(engine)
 except:
     pass
 
-def add_customer(telegram_id, name, number, birthday=None) -> Customer:
-    '''Cоздания пользователя'''
-    customer =  Customer.create(
-            telegram_id=telegram_id,
-            name=name,
-            number=number,
-            birthday=birthday)
-    return customer
 
-def find_customer(telegram_id) -> Customer:
+def add_customer(telegram_id, qresto_id, name = None, news=False, phone_number=None):
+    '''Cоздания пользователя'''
+    with engine.connect() as conn:
+        stmt = insert(customer).values(
+            telegram_id=telegram_id,
+            qresto_id=qresto_id,
+            name=name,
+            phone_number=phone_number,
+            news=news
+            )
+        conn.execute(stmt)
+        conn.commit()
+
+def find_customer(telegram_id):
     '''Поиск пользователя по telegram_id'''
-    return Customer.get(Customer.telegram_id==telegram_id)
+    with engine.connect() as conn:
+        stmt = select(customer).where(customer.c.telegram_id==telegram_id)
+        exec = conn.execute(stmt)
+        return exec.all()
