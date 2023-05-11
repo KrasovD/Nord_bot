@@ -70,7 +70,7 @@ class Api():
         with open('data.json', 'w') as base:
             json.dump(response, base)
 
-    def _format_history(self, history) -> str:
+    def _format_history(self, history) -> list:
         '''Шаблон текста истории начисления\списания баллов'''
         text = list()
         for data in history:
@@ -251,6 +251,7 @@ class Crm_info(CustomerOperation):
                 img.save('files/qr/qr_%d.png' % phone_number)
                 return open('files/qr/qr_%d.png' % phone_number, 'rb')
             except:
+                os.mkdir('files')
                 os.mkdir('files/qr')
                 img.save('files/qr/qr_%d.png' % phone_number)
                 return open('files/qr/qr_%d.png' % phone_number, 'rb')

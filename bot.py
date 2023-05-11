@@ -80,7 +80,7 @@ async def show_history(message: types.Message, page=1, previous_message=None):
         # создание объекта гость с данными из QuickResto
         guest = api.Crm_info()
         history = guest.client_history(customer[0].phone_number)
-        if len(history) > 6 and type(history) == list():
+        if len(history) > 6 and type(history) == type(list()):
             pages_count = len(history) // 6 + 1
             buttons = types.InlineKeyboardMarkup()
             left = page-1 if page != 1 else pages_count
@@ -97,7 +97,6 @@ async def show_history(message: types.Message, page=1, previous_message=None):
                     await message.answer(text='{}'.format(''.join(history[(page-1)*6:page*6])), reply_markup=buttons)
                 else:
                     await message.edit_text(text='{}'.format(''.join(history[(page-1)*6:page*6])), reply_markup=buttons)
-                # await message.answer(text='{}'.format(''.join(history[(page-1)*6:page*6])), reply_markup=buttons)
             except:
                 pass
         else:
