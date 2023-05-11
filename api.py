@@ -3,6 +3,7 @@ import json
 import qrcode
 import datetime
 import time
+import os
 
 import config
 
@@ -246,8 +247,13 @@ class Crm_info(CustomerOperation):
             )
             qr.add_data(phone_number)
             img = qr.make_image(fill_color="black", back_color="white")
-            img.save('files/qr/qr_%d.png' % phone_number)
-            return open('files/qr/qr_%d.png' % phone_number, 'rb')
+            try:
+                img.save('files/qr/qr_%d.png' % phone_number)
+                return open('files/qr/qr_%d.png' % phone_number, 'rb')
+            except:
+                os.mkdir('files/qr')
+                img.save('files/qr/qr_%d.png' % phone_number)
+                return open('files/qr/qr_%d.png' % phone_number, 'rb')
 
 
 if __name__ == '__main__':
